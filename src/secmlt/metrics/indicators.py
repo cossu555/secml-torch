@@ -238,7 +238,7 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
     print("end unstable_predictions_indicator\n")
 
     print("staring silent_success_indicator...")
-    I3 = silent_success_indicator(P_tracker,y_model_adv,y_0,y_target)
+    I3 = bool(silent_success_indicator(P_tracker, y_model_adv, y_0, y_target).any().item())
     print("end silent_success_indicator\n")
 
     print("starting incomplete_optimization_indicator...")

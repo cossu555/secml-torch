@@ -66,19 +66,24 @@ def unstable_predictions_indicator(attack,model,data_loader: DataLoader,gamma=10
     metric = torch.stack(results, dim=0).mean().clip(max=1)
     return metric.item()
 
-def silent_success_indicator(P_hist: torch.Tensor, y0: torch.Tensor, y_target=None) -> bool:
-    P_hist = P_hist.to(device)
+def silent_success_indicator(P_hist: torch.Tensor,y_adv: torch.Tensor,y0: torch.Tensor,y_target=None,) -> torch.Tensor:
     y0 = y0.to(device)
+    y_adv = torch.as_tensor(y_adv, device=device)
 
     if y_target is None:
-        final_fail = (P_hist[:, -1] == y0)
-        found_adv_along_path = (P_hist[:, :-1] != y0[:, None]).any(dim=1)
+        returned_fail = (y_adv == y0)
+        found_adv_along_path = (P_hist != y0[:, None]).any(dim=1)
     else:
-        y_Target = torch.as_tensor(y_target, device=device).expand_as(y0)
-        final_fail = (P_hist[:, -1] != y_Target)
-        found_adv_along_path = (P_hist[:, :-1] == y_Target[:, None]).any(dim=1)
+        y_target = torch.as_tensor(y_target, device=device)
+        if y_target.ndim == 0:
+            y_target = y_target.expand_as(y0)
+        else:
+            y_target = y_target.to(device)
 
-    return bool((final_fail & found_adv_along_path).any().item())
+        returned_fail = (y_adv != y_target)
+        found_adv_along_path = (P_hist == y_target[:, None]).any(dim=1)
+
+    return returned_fail & found_adv_along_path
 
 def incomplete_optimization_indicator(loss_hist: torch.Tensor, k: int = 10, mu: float = 0.01) -> float:
     if loss_hist.numel() == 0:
@@ -111,7 +116,7 @@ def _reset_trackers(obj):
     if hasattr(obj, "reset"):
         obj.reset()
 
-def unconstrained_attack_failure_indicator(attack,model,dataloader) -> float:
+def unconstrained_attack_failure_indicator(attack,model,dataloader,y_adv) -> float:
     # set unconstrained bound
     man = getattr(attack, "manipulation_function", None)
     if man is not None and hasattr(man, "perturbation_constraints"):
@@ -140,7 +145,7 @@ def unconstrained_attack_failure_indicator(attack,model,dataloader) -> float:
         total += trigger.numel()
 
     y_o= torch.cat(y_o,dim=0)
-    if(silent_success_indicator(P_tracker,y_o,y_targeted)):
+    if(silent_success_indicator(P_tracker,y_adv,y_o,y_targeted)):
         return -1
 
     return fails / total if total > 0 else 0.0
@@ -210,7 +215,7 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
     print("end unstable_predictions_indicator\n")
 
     print("staring silent_success_indicator...")
-    I3 = silent_success_indicator(P_tracker,y_0,y_target)
+    I3 = silent_success_indicator(P_tracker,y_model_adv,y_0,y_target)
     print("end silent_success_indicator\n")
 
     print("starting incomplete_optimization_indicator...")
@@ -224,7 +229,7 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
     else: I5=None; print("no surrogate\n")
 
     print("starting unconstrained_attack_failure_indicator..")
-    I6 = unconstrained_attack_failure_indicator(attack,model,dataloader)
+    I6 = unconstrained_attack_failure_indicator(attack,model,dataloader,y_model_adv)
     print("end unconstrained_attack_failure_indicator\n")
 
     print("starting Attack_fails...")

@@ -67,6 +67,7 @@ def unstable_predictions_indicator(attack,model,data_loader: DataLoader,gamma=10
     return metric.item()
 
 def silent_success_indicator(P_hist, y_adv, y_ref, y_target=None):
+    P_hist = torch.as_tensor(P_hist, device=device)
     y_ref = y_ref.to(device)
     y_adv = torch.as_tensor(y_adv, device=device)
 
@@ -300,5 +301,6 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
         'transfer_failure': I5,
         'unconstrained_attack_failure': I6,
     }, index=[0])
+
 
     return df

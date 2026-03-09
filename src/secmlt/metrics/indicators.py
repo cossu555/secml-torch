@@ -200,26 +200,58 @@ def attack_fails(adv_pred, y0, target_label=None, transfer_scores=None) -> float
 def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=None,gamma=50,radius = 8/255):
     #pre-processing:
     print("starting pre-processing...")
-    if(next(tr.get() for tr in attack.trackers[0].trackers if isinstance(tr, PredictionTracker)).numel() != 0):
-        next(tr for tr in attack.trackers[0].trackers if isinstance(tr, PredictionTracker)).reset()
-    if(next(tr.get() for tr in attack.trackers[0].trackers if isinstance(tr, LossTracker)).numel() != 0):
-        next(tr for tr in attack.trackers[0].trackers if isinstance(tr, LossTracker)).reset()
-    ds_adv = attack(model,dataloader)
-    x_adv_batched = []
+
+    pred_tracker_obj = next(tr for tr in attack.trackers[0].trackers if isinstance(tr, PredictionTracker))
+    loss_tracker_obj = next(tr for tr in attack.trackers[0].trackers if isinstance(tr, LossTracker))
+
+    if pred_tracker_obj.get().numel() != 0:
+        pred_tracker_obj.reset()
+    if loss_tracker_obj.get().numel() != 0:
+        loss_tracker_obj.reset()
+
+    # ---------------------------
+    # RUN 1: attack on real model
+    # ---------------------------
+    ds_adv = attack(model, dataloader)
+
     y_0_batched = []
     y_model_adv_batched = []
-    y_surrogate_adv_batched = []
-    for x,y in ds_adv:
-        x_adv_batched.append(x)
+
+    for x, y in ds_adv:
         y_0_batched.append(y)
         y_model_adv_batched.append(model.decision_function(x).argmax(dim=1))
-        if surrogate_model is not None:
-            y_surrogate_adv_batched.append(surrogate_model.decision_function(x))
+
     y_0 = torch.cat(y_0_batched, dim=0)
-    y_model_adv = torch.cat(y_model_adv_batched,dim=0)
+    y_model_adv = torch.cat(y_model_adv_batched, dim=0)
+
+    # save trackers from the REAL-MODEL run
+    P_tracker = pred_tracker_obj.get()
+    L_tracker = loss_tracker_obj.get()
+
+    # --------------------------------
+    # RUN 2: attack on surrogate model
+    # --------------------------------
     if surrogate_model is not None:
-        y_surrogate_adv = torch.cat(y_surrogate_adv_batched, dim=0).argmax(dim=1)
-    else: y_surrogate_adv = None
+        if pred_tracker_obj.get().numel() != 0:
+            pred_tracker_obj.reset()
+        if loss_tracker_obj.get().numel() != 0:
+            loss_tracker_obj.reset()
+
+        ds_adv_transfer = attack(surrogate_model, dataloader)
+
+        y_surrogate_adv_batched = []
+        y_model_transfer_batched = []
+
+        for x, y in ds_adv_transfer:
+            y_surrogate_adv_batched.append(surrogate_model.decision_function(x).argmax(dim=1))
+            y_model_transfer_batched.append(model.decision_function(x).argmax(dim=1))
+
+        y_surrogate_adv = torch.cat(y_surrogate_adv_batched, dim=0)
+        y_model_transfer = torch.cat(y_model_transfer_batched, dim=0)
+    else:
+        y_surrogate_adv = None
+        y_model_transfer = None
+
     print("end pre-processing\n")
 
     #trackers:
@@ -247,7 +279,7 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
 
     if surrogate_model is not None:
         print("start transfer_failure_indicator..")
-        I5 = transfer_failure_indicator(y_surrogate_adv, y_model_adv)
+        I5 = transfer_failure_indicator(y_model_transfer, y_surrogate_adv)
         print("end transfer_failure_indicator\n")
     else: I5=None; print("no surrogate\n")
 

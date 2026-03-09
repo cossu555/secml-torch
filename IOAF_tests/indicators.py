@@ -7,7 +7,7 @@ from secmlt.trackers import (
     PredictionTracker,
 )
 
-device = 'cpu' if torch.cuda.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def unavailable_gradients_indicator(model, attack, dataloader) -> bool:
     for x, y in dataloader:
@@ -300,5 +300,6 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
         'transfer_failure': I5,
         'unconstrained_attack_failure': I6,
     }, index=[0])
+
 
     return df

@@ -7,7 +7,7 @@ from secmlt.trackers import (
     PredictionTracker,
 )
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cpu' if torch.cuda.is_available() else 'cpu'
 
 def unavailable_gradients_indicator(model, attack, dataloader) -> bool:
     for x, y in dataloader:
@@ -66,19 +66,24 @@ def unstable_predictions_indicator(attack,model,data_loader: DataLoader,gamma=10
     metric = torch.stack(results, dim=0).mean().clip(max=1)
     return metric.item()
 
-def silent_success_indicator(P_hist: torch.Tensor, y0: torch.Tensor, y_target=None) -> bool:
-    P_hist = P_hist.to(device)
+def silent_success_indicator(P_hist: torch.Tensor,y_adv: torch.Tensor,y0: torch.Tensor,y_target=None,) -> torch.Tensor:
     y0 = y0.to(device)
+    y_adv = torch.as_tensor(y_adv, device=device)
 
     if y_target is None:
-        final_fail = (P_hist[:, -1] == y0)
-        found_adv_along_path = (P_hist[:, :-1] != y0[:, None]).any(dim=1)
+        returned_fail = (y_adv == y0)
+        found_adv_along_path = (P_hist != y0[:, None]).any(dim=1)
     else:
-        y_Target = torch.as_tensor(y_target, device=device).expand_as(y0)
-        final_fail = (P_hist[:, -1] != y_Target)
-        found_adv_along_path = (P_hist[:, :-1] == y_Target[:, None]).any(dim=1)
+        y_target = torch.as_tensor(y_target, device=device)
+        if y_target.ndim == 0:
+            y_target = y_target.expand_as(y0)
+        else:
+            y_target = y_target.to(device)
 
-    return bool((final_fail & found_adv_along_path).any().item())
+        returned_fail = (y_adv != y_target)
+        found_adv_along_path = (P_hist == y_target[:, None]).any(dim=1)
+
+    return returned_fail & found_adv_along_path
 
 def incomplete_optimization_indicator(loss_hist: torch.Tensor, k: int = 10, mu: float = 0.01) -> float:
     if loss_hist.numel() == 0:
@@ -111,39 +116,62 @@ def _reset_trackers(obj):
     if hasattr(obj, "reset"):
         obj.reset()
 
-def unconstrained_attack_failure_indicator(attack,model,dataloader) -> float:
-    # set unconstrained bound
+def unconstrained_attack_failure_indicator(attack, model, dataloader) -> float:
     man = getattr(attack, "manipulation_function", None)
+
+    old_radii = []
     if man is not None and hasattr(man, "perturbation_constraints"):
         for c in man.perturbation_constraints:
             if isinstance(c, LpConstraint):
+                old_radii.append((c, c.radius.clone()))
                 c.radius = torch.full_like(c.radius, float("inf"))
 
-    y_o = []
-    _reset_trackers(attack.trackers[0].trackers)
-    ds_unc = attack(model,dataloader)
-    P_tracker = next(tr.get() for tr in attack.trackers[0].trackers if isinstance(tr, PredictionTracker))
-    y_targeted = attack.y_target
-    fails = 0
-    total = 0
-    for (x_unc_b, y_o_b) in ds_unc:
-        y_unc_b = model.decision_function(x_unc_b).argmax(dim=1)
-        y_unc_b=y_unc_b.to(device);y_o_b=y_o_b.to(device)
-        y_o.append(y_o_b)
-        if y_targeted is None:
-            trigger = (y_unc_b == y_o_b)
-        else:
-            y_t_b = torch.full_like(y_o_b, int(y_targeted))
-            trigger = (y_unc_b != y_t_b)
+    try:
+        _reset_trackers(attack.trackers[0].trackers)
+        ds_unc = attack(model, dataloader)
 
-        fails += int(trigger.sum().item())
-        total += trigger.numel()
+        P_tracker = next(
+            tr.get() for tr in attack.trackers[0].trackers
+            if isinstance(tr, PredictionTracker)
+        )
 
-    y_o= torch.cat(y_o,dim=0)
-    if(silent_success_indicator(P_tracker,y_o,y_targeted)):
-        return -1
+        y_targeted = attack.y_target
+        y_o = []
+        y_unc = []
+        fails = 0
+        total = 0
 
-    return fails / total if total > 0 else 0.0
+        for x_unc_b, y_o_b in ds_unc:
+            y_unc_b = model.decision_function(x_unc_b).argmax(dim=1)
+
+            y_unc_b = y_unc_b.to(device)
+            y_o_b = y_o_b.to(device)
+
+            y_o.append(y_o_b)
+            y_unc.append(y_unc_b)
+
+            if y_targeted is None:
+                trigger = (y_unc_b == y_o_b)
+            else:
+                y_t_b = torch.as_tensor(y_targeted, device=device)
+                if y_t_b.ndim == 0:
+                    y_t_b = y_t_b.expand_as(y_o_b)
+                trigger = (y_unc_b != y_t_b)
+
+            fails += int(trigger.sum().item())
+            total += trigger.numel()
+
+        y_o = torch.cat(y_o, dim=0)
+        y_unc = torch.cat(y_unc, dim=0)
+
+        if silent_success_indicator(P_tracker, y_unc, y_o, y_targeted).any().item():
+            return -1.0
+
+        return fails / total if total > 0 else 0.0
+
+    finally:
+        for c, old_radius in old_radii:
+            c.radius = old_radius
 
 REJECT_CLASSES = [-1, 10]
 
@@ -172,26 +200,58 @@ def attack_fails(adv_pred, y0, target_label=None, transfer_scores=None) -> float
 def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=None,gamma=50,radius = 8/255):
     #pre-processing:
     print("starting pre-processing...")
-    if(next(tr.get() for tr in attack.trackers[0].trackers if isinstance(tr, PredictionTracker)).numel() != 0):
-        next(tr for tr in attack.trackers[0].trackers if isinstance(tr, PredictionTracker)).reset()
-    if(next(tr.get() for tr in attack.trackers[0].trackers if isinstance(tr, LossTracker)).numel() != 0):
-        next(tr for tr in attack.trackers[0].trackers if isinstance(tr, LossTracker)).reset()
-    ds_adv = attack(model,dataloader)
-    x_adv_batched = []
+
+    pred_tracker_obj = next(tr for tr in attack.trackers[0].trackers if isinstance(tr, PredictionTracker))
+    loss_tracker_obj = next(tr for tr in attack.trackers[0].trackers if isinstance(tr, LossTracker))
+
+    if pred_tracker_obj.get().numel() != 0:
+        pred_tracker_obj.reset()
+    if loss_tracker_obj.get().numel() != 0:
+        loss_tracker_obj.reset()
+
+    # ---------------------------
+    # RUN 1: attack on real model
+    # ---------------------------
+    ds_adv = attack(model, dataloader)
+
     y_0_batched = []
     y_model_adv_batched = []
-    y_surrogate_adv_batched = []
-    for x,y in ds_adv:
-        x_adv_batched.append(x)
+
+    for x, y in ds_adv:
         y_0_batched.append(y)
         y_model_adv_batched.append(model.decision_function(x).argmax(dim=1))
-        if surrogate_model is not None:
-            y_surrogate_adv_batched.append(surrogate_model.decision_function(x))
+
     y_0 = torch.cat(y_0_batched, dim=0)
-    y_model_adv = torch.cat(y_model_adv_batched,dim=0)
+    y_model_adv = torch.cat(y_model_adv_batched, dim=0)
+
+    # save trackers from the REAL-MODEL run
+    P_tracker = pred_tracker_obj.get()
+    L_tracker = loss_tracker_obj.get()
+
+    # --------------------------------
+    # RUN 2: attack on surrogate model
+    # --------------------------------
     if surrogate_model is not None:
-        y_surrogate_adv = torch.cat(y_surrogate_adv_batched, dim=0).argmax(dim=1)
-    else: y_surrogate_adv = None
+        if pred_tracker_obj.get().numel() != 0:
+            pred_tracker_obj.reset()
+        if loss_tracker_obj.get().numel() != 0:
+            loss_tracker_obj.reset()
+
+        ds_adv_transfer = attack(surrogate_model, dataloader)
+
+        y_surrogate_adv_batched = []
+        y_model_transfer_batched = []
+
+        for x, y in ds_adv_transfer:
+            y_surrogate_adv_batched.append(surrogate_model.decision_function(x).argmax(dim=1))
+            y_model_transfer_batched.append(model.decision_function(x).argmax(dim=1))
+
+        y_surrogate_adv = torch.cat(y_surrogate_adv_batched, dim=0)
+        y_model_transfer = torch.cat(y_model_transfer_batched, dim=0)
+    else:
+        y_surrogate_adv = None
+        y_model_transfer = None
+
     print("end pre-processing\n")
 
     #trackers:
@@ -210,7 +270,7 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
     print("end unstable_predictions_indicator\n")
 
     print("staring silent_success_indicator...")
-    I3 = silent_success_indicator(P_tracker,y_0,y_target)
+    I3 = bool(silent_success_indicator(P_tracker, y_model_adv, y_0, y_target).any().item())
     print("end silent_success_indicator\n")
 
     print("starting incomplete_optimization_indicator...")
@@ -219,7 +279,7 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
 
     if surrogate_model is not None:
         print("start transfer_failure_indicator..")
-        I5 = transfer_failure_indicator(y_surrogate_adv, y_model_adv)
+        I5 = transfer_failure_indicator(y_model_transfer, y_surrogate_adv)
         print("end transfer_failure_indicator\n")
     else: I5=None; print("no surrogate\n")
 
@@ -228,7 +288,7 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
     print("end unconstrained_attack_failure_indicator\n")
 
     print("starting Attack_fails...")
-    Attack_fails = attack_fails(y_model_adv,y_0)
+    Attack_fails = attack_fails(y_model_adv, y_0, target_label=attack.y_target)
     print("end Attack_fails\n")
 
     df = pd.DataFrame(data={

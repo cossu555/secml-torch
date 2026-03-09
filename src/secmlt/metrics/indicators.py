@@ -66,17 +66,17 @@ def unstable_predictions_indicator(attack,model,data_loader: DataLoader,gamma=10
     metric = torch.stack(results, dim=0).mean().clip(max=1)
     return metric.item()
 
-def silent_success_indicator(P_hist: torch.Tensor,y_adv: torch.Tensor,y0: torch.Tensor,y_target=None,) -> torch.Tensor:
-    y0 = y0.to(device)
+def silent_success_indicator(P_hist, y_adv, y_ref, y_target=None):
+    y_ref = y_ref.to(device)
     y_adv = torch.as_tensor(y_adv, device=device)
 
     if y_target is None:
-        returned_fail = (y_adv == y0)
-        found_adv_along_path = (P_hist != y0[:, None]).any(dim=1)
+        returned_fail = (y_adv == y_ref)
+        found_adv_along_path = (P_hist != y_ref[:, None]).any(dim=1)
     else:
         y_target = torch.as_tensor(y_target, device=device)
         if y_target.ndim == 0:
-            y_target = y_target.expand_as(y0)
+            y_target = y_target.expand_as(y_ref)
         else:
             y_target = y_target.to(device)
 
@@ -201,6 +201,12 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
     #pre-processing:
     print("starting pre-processing...")
 
+    y_clean_pred_batched = []
+    for x, _ in dataloader:
+        x = x.to(device)
+        y_clean_pred_batched.append(model.decision_function(x).argmax(dim=1))
+    y_clean_pred = torch.cat(y_clean_pred_batched, dim=0)
+
     pred_tracker_obj = next(tr for tr in attack.trackers[0].trackers if isinstance(tr, PredictionTracker))
     loss_tracker_obj = next(tr for tr in attack.trackers[0].trackers if isinstance(tr, LossTracker))
 
@@ -264,7 +270,7 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
     print("end unstable_predictions_indicator\n")
 
     print("staring silent_success_indicator...")
-    I3 = bool(silent_success_indicator(P_tracker, y_model_adv, y_0, y_target).any().item())
+    I3 = bool(silent_success_indicator(P_tracker, y_model_adv, y_clean_pred, y_target).any().item())
     print("end silent_success_indicator\n")
 
     print("starting incomplete_optimization_indicator...")

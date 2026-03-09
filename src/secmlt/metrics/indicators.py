@@ -256,7 +256,7 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
     print("end unconstrained_attack_failure_indicator\n")
 
     print("starting Attack_fails...")
-    Attack_fails = attack_fails(y_model_adv,y_0)
+    Attack_fails = attack_fails(y_model_adv, y_0, target_label=attack.y_target)
     print("end Attack_fails\n")
 
     df = pd.DataFrame(data={

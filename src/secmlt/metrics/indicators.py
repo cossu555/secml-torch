@@ -116,39 +116,62 @@ def _reset_trackers(obj):
     if hasattr(obj, "reset"):
         obj.reset()
 
-def unconstrained_attack_failure_indicator(attack,model,dataloader,y_adv) -> float:
-    # set unconstrained bound
+def unconstrained_attack_failure_indicator(attack, model, dataloader) -> float:
     man = getattr(attack, "manipulation_function", None)
+
+    old_radii = []
     if man is not None and hasattr(man, "perturbation_constraints"):
         for c in man.perturbation_constraints:
             if isinstance(c, LpConstraint):
+                old_radii.append((c, c.radius.clone()))
                 c.radius = torch.full_like(c.radius, float("inf"))
 
-    y_o = []
-    _reset_trackers(attack.trackers[0].trackers)
-    ds_unc = attack(model,dataloader)
-    P_tracker = next(tr.get() for tr in attack.trackers[0].trackers if isinstance(tr, PredictionTracker))
-    y_targeted = attack.y_target
-    fails = 0
-    total = 0
-    for (x_unc_b, y_o_b) in ds_unc:
-        y_unc_b = model.decision_function(x_unc_b).argmax(dim=1)
-        y_unc_b=y_unc_b.to(device);y_o_b=y_o_b.to(device)
-        y_o.append(y_o_b)
-        if y_targeted is None:
-            trigger = (y_unc_b == y_o_b)
-        else:
-            y_t_b = torch.full_like(y_o_b, int(y_targeted))
-            trigger = (y_unc_b != y_t_b)
+    try:
+        _reset_trackers(attack.trackers[0].trackers)
+        ds_unc = attack(model, dataloader)
 
-        fails += int(trigger.sum().item())
-        total += trigger.numel()
+        P_tracker = next(
+            tr.get() for tr in attack.trackers[0].trackers
+            if isinstance(tr, PredictionTracker)
+        )
 
-    y_o= torch.cat(y_o,dim=0)
-    if(silent_success_indicator(P_tracker,y_adv,y_o,y_targeted)):
-        return -1
+        y_targeted = attack.y_target
+        y_o = []
+        y_unc = []
+        fails = 0
+        total = 0
 
-    return fails / total if total > 0 else 0.0
+        for x_unc_b, y_o_b in ds_unc:
+            y_unc_b = model.decision_function(x_unc_b).argmax(dim=1)
+
+            y_unc_b = y_unc_b.to(device)
+            y_o_b = y_o_b.to(device)
+
+            y_o.append(y_o_b)
+            y_unc.append(y_unc_b)
+
+            if y_targeted is None:
+                trigger = (y_unc_b == y_o_b)
+            else:
+                y_t_b = torch.as_tensor(y_targeted, device=device)
+                if y_t_b.ndim == 0:
+                    y_t_b = y_t_b.expand_as(y_o_b)
+                trigger = (y_unc_b != y_t_b)
+
+            fails += int(trigger.sum().item())
+            total += trigger.numel()
+
+        y_o = torch.cat(y_o, dim=0)
+        y_unc = torch.cat(y_unc, dim=0)
+
+        if silent_success_indicator(P_tracker, y_unc, y_o, y_targeted).any().item():
+            return -1.0
+
+        return fails / total if total > 0 else 0.0
+
+    finally:
+        for c, old_radius in old_radii:
+            c.radius = old_radius
 
 REJECT_CLASSES = [-1, 10]
 
@@ -229,7 +252,7 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
     else: I5=None; print("no surrogate\n")
 
     print("starting unconstrained_attack_failure_indicator..")
-    I6 = unconstrained_attack_failure_indicator(attack,model,dataloader,y_model_adv)
+    I6 = unconstrained_attack_failure_indicator(attack,model,dataloader)
     print("end unconstrained_attack_failure_indicator\n")
 
     print("starting Attack_fails...")

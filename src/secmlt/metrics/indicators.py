@@ -254,12 +254,6 @@ def compute_indicators(attack,model,dataloader,surrogate_model=None,y_target=Non
 
     print("end pre-processing\n")
 
-    #trackers:
-    print("obtaining trackers...")
-    P_tracker = next(tr.get() for tr in attack.trackers[0].trackers if isinstance(tr, PredictionTracker))
-    L_tracker = next(tr.get() for tr in attack.trackers[0].trackers if isinstance(tr, LossTracker))
-    print("trackers obtained\n")
-
     #indicators:
     print("starting unavailable_gradients_indicator...")
     I1 = unavailable_gradients_indicator(model,attack,dataloader)
